@@ -1,9 +1,15 @@
 #!/usr/bin/node
 'use strict';
 
+process.on('uncaughtException', function(err) {
+	console.log(err.stack);
+});
+
 const ReqList = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE'];
 
+var sys = require('util');
 var net = require('net');
+var url = require('url');
 
 var HOST = '127.0.0.1';
 var PORT = 6969;
@@ -19,14 +25,18 @@ var server = net.createServer({allowHalfOpen: true}, function(sock) {
     
     // We have a connection - a socket object is assigned to the connection automatically
     console.log('CONNECTED: ' + sock.remoteAddress +':'+ sock.remotePort);
+
+    var client = '';
+
+    var isClientClosed = false;
     
     // Add a 'data' event handler to this instance of socket
     sock.on('data', function(data) {
-        // create new client socket to sent browser's data to destination
-        var client = new net.Socket({allowHalfOpen: true});
+console.log(data.toString('utf-8'));
+    	sock.pause();
 
         // get first line of data for further use
-        var parseReq = data.toString('utf-8').split('\n')[0];
+        var parseReq = data.toString('utf-8').split(/\n/)[0];
 
         // get request from header
         var Request = parseReq.toUpperCase().split(' ')[0];
@@ -62,68 +72,129 @@ var server = net.createServer({allowHalfOpen: true}, function(sock) {
         // get host name from header
         var re = /host:\w*([^:\r\n]+)/i;
         var rawHost = data.toString('utf-8').match(re);
-console.log(rawHost);
-        var Host = rawHost.toString('utf-8').split(' ')[1].split(',')[0];
+		// console.log(rawHost);
+        var Host;
 
+        // if the data is a request, create a new socket 
         if (validateReq(Request)) {
+
+	        // create new client socket to sent browser's data to destination
+        	client = new net.Socket({allowHalfOpen: true});
+
+        	Host = rawHost.toString('utf-8').split(' ')[1].split(',')[0];
 
         	console.log('>>> ' + Request + ' ' + URI() + ' ' + cPort);
 
         	console.log('>>> ' + 'HOST: ' + Host);
-        } 
-		console.log('DATA ' + sock.remoteAddress + ': \n' + data);
 
+        	// try to connect dest
+			client.connect(cPort, Host);
 
-		sock.pause();
-		client.connect(cPort, Host);
+			client.on('connect', function()
+			{
+				console.log('CONNECTED TO DESTINATION!!');
+				if (Request === 'CONNECT') {
+					sock.pause();
+					sock.write("HTTP/1.0 200 OK\r\nConnection: close\r\n\r\n");
+					sock.resume();
+				} else {
+					client.write(data);
+				}
+			});
 
-		client.on('connect', function()
-		{
-console.log('CONNECTED TO DESTINATION!!');
+			console.log('DATA ' + sock.remoteAddress + ': \n' + data);
+	        
+	        // handle data from dest
+			client.on('data', function(cdata)
+			{
 
-			sock.write('HTTP/1.1 200 OK\r\n');
-			// Write request to your node.js application
-			client.write(data);
+				console.log(cdata.toString('utf-8'));
+				if (isClientClosed) {
+					client.end();
+					return;
+				}
+				sock.pause();
+				client.pause();
+				console.log('RECEIVE SOMETHING FROM DESTINATION!!');
+				
+				// Write client data to browser
+				sock.write(cdata);
+				sock.resume();
+				client.resume();
+				// sock.pipe(sock);
+				// sock.end();
+			});
 
-		});
-        
-		client.on('data', function(cdata)
-		{
-console.log('RECEIVE SOMETHING FROM DESTINATION!!');
-console.log(cdata.toString('utf-8'));
-			sock.resume();
-			// Write client data to browser
-			sock.write(cdata);
-			// sock.pipe(sock);
-			// sock.end();
-		});
+			client.on('end', function(){
+				console.log('dest is disconnected');
+				sock.end();
+				client = '';
+			});
 
-		client.on('end', function(){
-			// sock.end();
-			client.destroy();
-		});
+			client.on('close', function() {
+				console.log('dest has been disconnected');
+				sock.end();
+				client = '';
+			});
+
+			client.on('error', function(err) {
+				console.log("socket error! " + err);
+				sock.end();
+				client = '';
+			});
+        } else {
+        	if (client !== '') {
+        		client.pause();
+        		sock.pause();
+        		client.write(data);
+        		sock.resume();
+        		client.resume();
+        	}
+        }
+
 
         // Write the data back to the socket, the client will receive it as data from the server
         // sock.write('You said "' + data + '"');
         
     });
     
-    // Add a 'close' event handler to this instance of socket
-    // sock.on('close', function(data) {
-    //     console.log('CLOSED: ' + sock.remoteAddress +' '+ sock.remotePort);
-    // });
+    //Add a 'close' event handler to this instance of socket
+    sock.on('close', function() {
+    	console.log('client is closed');
+        console.log('CLOSE: ' + sock.remoteAddress +' '+ sock.remotePort);
+        if (client !== '') {
+        	client.end();
+        	client = '';
+        }
+        isClientClosed = true;
+    });
 
-    // Add a 'close' event handler to this instance of socket
-    // sock.on('end', function(data) {
-    //     console.log('END: ' + sock.remoteAddress +' '+ sock.remotePort);
-    // });
+    //Add a 'close' event handler to this instance of socket
+    sock.on('end', function() {
+    	console.log('client disconnected');
+        console.log('END: ' + sock.remoteAddress +' '+ sock.remotePort);
+        if (client !== '') {
+        	client.end();
+        	client = '';
+        }
+        isClientClosed = true;
+    });
+
+    sock.on('error', function(err) {
+    	console.log('client error! ' + err);
+        if (client !== '') {
+        	client.end();
+        	client = '';
+        }
+        isClientClosed = true;
+    });
     
 }).listen(PORT, HOST);
 
-server.on('error', function (err){
-  // Error processing i just pass whole object
-  console.log(err);
-});
+// server.on('error', function (err){
+//   // Error processing i just pass whole object
+//   console.log(err);
+// });
 
 console.log('Server listening on ' + HOST +':'+ PORT);
 
